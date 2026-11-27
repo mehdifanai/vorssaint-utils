@@ -1,0 +1,55 @@
+name: Lid cue portability probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  missing-logo:
+    strategy:
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Compile the production service and exercise unsupported hardware
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.runner }}" == macos-15 ]]; then
+            export DEVELOPER_DIR=/Applications/Xcode_16.2.app/Contents/Developer
+          fi
+          sw_vers -productVersion
+          xcrun swiftc --version
+          work="$(mktemp -d)"
+          sed -n '/^enum LidLogoCuePattern:/,/^}$/p' Sources/Vorssaint/Services/Notch/NotchAgentSupport.swift > "$work/Pattern.swift"
+          cat > "$work/Probe.swift" <<'SWIFT'
+          import Foundation
+          import IOKit
+
+          @main @MainActor
+          struct Probe {
+              static func main() {
+                  let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceNameMatching("bklb-backlight"))
+                  precondition(service == IO_OBJECT_NULL, "The runner unexpectedly has a lid logo device")
+                  precondition(!LidLogoCompletionCue.isSupported, "The cue was advertised without the hardware")
+                  let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                  let cue = LidLogoCompletionCue(driver: { nil }, journal: folder.appendingPathComponent("restore"),
+                                                 mayControlLogo: { true })
+                  cue.play(.single)
+                  cue.play(.double)
+                  cue.cancel()
+                  precondition(!FileManager.default.fileExists(atPath: folder.path), "Unsupported hardware left recovery state")
+                  print("No lid logo: support is false and both pulse requests safely do nothing")
+              }
+          }
+          SWIFT
+          xcrun swiftc -target "$(uname -m)-apple-macosx14.0" \
+            Sources/Vorssaint/Services/PrivateFileStore.swift \
+            Sources/Vorssaint/Services/Notch/LidLogoCompletionCue.swift \
+            "$work/Pattern.swift" "$work/Probe.swift" -o "$work/probe"
+          "$work/probe"
